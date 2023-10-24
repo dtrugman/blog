@@ -1,0 +1,470 @@
+---
+layout: post
+title:  "Improving C++: Add Golang's Defer"
+date:   2019-02-06 00:00:00 +0000
+categories: Programming
+---
+In this blog post, I’m going to show a super easy yet incredibly powerful implementation of Go’s defer concept in C++. (Originally published on [Medium.com](https://dtrugman.medium.com/gos-defer-like-implementation-for-c-a91344bb08bf), 06-Feb-2019)
+
+Every time I read about a new system-programming language, I'm enthused about the possibility of learning cool concepts. Those languages are designed from scratch by groups of super-capable engineers with an accumulated experience of hundreds of years in order to create the "best" ecosystem possible for this kind of programming.
+
+This was exactly the reason that made me learn [Go](https://go.dev/) some time ago. Go is a very-cool language, conceived in 2007 at Google and aiming to ease the development process for applications that involve multi-core machines and/or elaborate networks. The goal was to create a clean and simple language while retaining efficiency, static typing and modularity.
+
+One of the things that I liked most about Go, was the `defer` concept. I liked it so much that I ran straight back to my compiler and wrote a C++ implementation I use ever since (both for my private projects and work).
+
+But before we talk about it, let's first present the problem solves.
+
+# The problem
+
+Any decent C++ developer knows that RAII is one of the cornerstones of modern C++. And don't just take my word for it:
+
+> "That's the basis of [RAII](https://www.stroustrup.com/bs_faq2.html#finally) (Resource Acquisition Is Initialization), which it the basis of some of the most effective modern C++ design techniques", [Bjorne Stroustrup](https://en.wikipedia.org/wiki/Bjarne_Stroustrup)
+
+When writing RAII-compliant code, you don't have to worry about the de-allocation of the resource. Take for example [`std::ifstream`](https://en.cppreference.com/w/cpp/io/basic_ifstream), you've created an instance, tried to read some data from the file and whether succeeded or failed miserably, you don't have to do anything else! No need to close anything, no need to free anything, everything is handled for you!
+
+But(!), when programming in C or C++, many system APIs will hand you a resource, that you are then responsible for closing/deallocating/etc. Understandably, this, just like any other task we have to do manually, is easily forgotten, making it prone to bugs, leaks and what not.
+
+Let's consider the following example, is there anything wrong with it?
+
+{% highlight cpp %}
+int update_startup_time() {
+    unsigned startup;
+    int fd = open(".startup_time", O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "open failed\n");
+        return -1;
+    }
+
+    if (read_startup_time(fd, &startup) != 0) {
+        close(fd);
+        fprintf(stderr, "read current startup time failed\n");
+        return -1;
+    }
+
+    fprintf(stdout, "last startup time was %u\n", startup);
+
+    startup = get_startup_time();
+    if (write_startup_time(fd, startup) != 0) {
+        fprintf(stderr, "write current startup time failed\n");
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+{% endhighlight %}
+
+YES, there is! If we manage to `open` the file, and then `read_current_startup`, but then fail while trying to `write_current_startup`, we will never close the `fd`. This is of course a resource leak, and may well result in exhausting all the file descriptors on a Linux system, if it goes unnoticed for too long.
+
+So, what are the solutions C++ developers usually use for such cases? They are dime a dozen, but I'lltry and pinpoint two common ones.
+
+# C-style solution: Goto
+
+Most C programmers will scream `goto` right away. Instead of handling the resource deallocation inside the `if` clause, we move the entire logic to the end of the function, and jump to it using `goto`. When used mildly, like in our example, it seems rather elegant:
+
+{% highlight cpp %}
+int update_startup_time() {
+    unsigned startup;
+    int fd = open(".startup_time", O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "open failed\n");
+        goto exit;
+    }
+
+    if (read_startup_time(fd, &startup) != 0) {
+        fprintf(stderr, "read current startup time failed\n");
+        goto exit;
+    }
+
+    fprintf(stdout, "last startup time was %u\n", startup);
+
+    startup = get_startup_time();
+    if (write_startup_time(fd, startup) != 0) {
+        fprintf(stderr, "write current startup time failed\n");
+        goto exit;
+    }
+
+    retval = 0;
+
+ exit:
+    if (fd > 0) {
+      close(fd);
+    }
+    return retval;
+}
+{% endhighlight %}
+
+But, will it scale? Let's see how it looks with more than one tag:
+
+{% highlight cpp %}
+static int event_hist_trigger_func(struct event_command *cmd_ops,
+                                   struct trace_event_file *file,
+                                   char *glob, char *cmd, char *param)
+{
+        unsigned int hist_trigger_bits = TRACING_MAP_BITS_DEFAULT;
+        struct event_trigger_data *trigger_data;
+        struct hist_trigger_attrs *attrs;
+        struct event_trigger_ops *trigger_ops;
+        struct hist_trigger_data *hist_data;
+        struct synth_event *se;
+        const char *se_name;
+        bool remove = false;
+        char *trigger, *p;
+        int ret = 0;
+
+        if (glob && strlen(glob)) {
+                last_cmd_set(param);
+                hist_err_clear();
+        }
+
+        if (!param)
+                return -EINVAL;
+
+        if (glob[0] == '!')
+                remove = true;
+
+        /*
+         * separate the trigger from the filter (k:v [if filter])
+         * allowing for whitespace in the trigger
+         */
+        p = trigger = param;
+        do {
+                p = strstr(p, "if");
+                if (!p)
+                        break;
+                if (p == param)
+                        return -EINVAL;
+                if (*(p - 1) != ' ' && *(p - 1) != '\t') {
+                        p++;
+                        continue;
+                }
+                if (p >= param + strlen(param) - strlen("if") - 1)
+                        return -EINVAL;
+                if (*(p + strlen("if")) != ' ' && *(p + strlen("if")) != '\t') {
+                        p++;
+                        continue;
+                }
+                break;
+        } while (p);
+
+        if (!p)
+                param = NULL;
+        else {
+                *(p - 1) = '\0';
+                param = strstrip(p);
+                trigger = strstrip(trigger);
+        }
+
+        attrs = parse_hist_trigger_attrs(trigger);
+        if (IS_ERR(attrs))
+                return PTR_ERR(attrs);
+
+        if (attrs->map_bits)
+                hist_trigger_bits = attrs->map_bits;
+
+        hist_data = create_hist_data(hist_trigger_bits, attrs, file, remove);
+        if (IS_ERR(hist_data)) {
+                destroy_hist_trigger_attrs(attrs);
+                return PTR_ERR(hist_data);
+        }
+
+        trigger_ops = cmd_ops->get_trigger_ops(cmd, trigger);
+
+        trigger_data = kzalloc(sizeof(*trigger_data), GFP_KERNEL);
+        if (!trigger_data) {
+                ret = -ENOMEM;
+                goto out_free;
+        }
+
+        trigger_data->count = -1;
+        trigger_data->ops = trigger_ops;
+        trigger_data->cmd_ops = cmd_ops;
+
+        INIT_LIST_HEAD(&trigger_data->list);
+        RCU_INIT_POINTER(trigger_data->filter, NULL);
+
+        trigger_data->private_data = hist_data;
+
+        /* if param is non-empty, it's supposed to be a filter */
+        if (param && cmd_ops->set_filter) {
+                ret = cmd_ops->set_filter(param, trigger_data, file);
+                if (ret < 0)
+                        goto out_free;
+        }
+
+        if (remove) {
+                if (!have_hist_trigger_match(trigger_data, file))
+                        goto out_free;
+
+                if (hist_trigger_check_refs(trigger_data, file)) {
+                        ret = -EBUSY;
+                        goto out_free;
+                }
+
+                cmd_ops->unreg(glob+1, trigger_ops, trigger_data, file);
+
+                mutex_lock(&synth_event_mutex);
+                se_name = trace_event_name(file->event_call);
+                se = find_synth_event(se_name);
+                if (se)
+                        se->ref--;
+                mutex_unlock(&synth_event_mutex);
+
+                ret = 0;
+                goto out_free;
+        }
+
+        ret = cmd_ops->reg(glob, trigger_ops, trigger_data, file);
+        /*
+         * The above returns on success the # of triggers registered,
+         * but if it didn't register any it returns zero.  Consider no
+         * triggers registered a failure too.
+         */
+        if (!ret) {
+                if (!(attrs->pause || attrs->cont || attrs->clear))
+                        ret = -ENOENT;
+                goto out_free;
+        } else if (ret < 0)
+                goto out_free;
+
+        if (get_named_trigger_data(trigger_data))
+                goto enable;
+
+        if (has_hist_vars(hist_data))
+                save_hist_vars(hist_data);
+
+        ret = create_actions(hist_data, file);
+        if (ret)
+                goto out_unreg;
+
+        ret = tracing_map_init(hist_data->map);
+        if (ret)
+                goto out_unreg;
+enable:
+        ret = hist_trigger_enable(trigger_data, file);
+        if (ret)
+                goto out_unreg;
+
+        mutex_lock(&synth_event_mutex);
+        se_name = trace_event_name(file->event_call);
+        se = find_synth_event(se_name);
+        if (se)
+                se->ref++;
+        mutex_unlock(&synth_event_mutex);
+
+        /* Just return zero, not the number of registered triggers */
+        ret = 0;
+ out:
+        if (ret == 0)
+                hist_err_clear();
+
+        return ret;
+ out_unreg:
+        cmd_ops->unreg(glob+1, trigger_ops, trigger_data, file);
+ out_free:
+        if (cmd_ops->set_filter)
+                cmd_ops->set_filter(NULL, trigger_data, NULL);
+
+        remove_hist_vars(hist_data);
+
+        kfree(trigger_data);
+
+        destroy_hist_data(hist_data);
+        goto out;
+}
+{% endhighlight %}
+
+> Note: This is an actual file from the Linux kernel (v4.20)
+
+If you ask me, this is just as error-prone. I've seen developers jump to the wrong label multiple times, and the repercussions are just the same. If you ask me, in most cases, `goto` is avoidable without compensating style or readability.
+
+# C++ style solution: Managed Objects
+
+In other scenarios I've seen, responsible developers created a managed wrapper around the specific object, so that it gets freed once it leaves the scope. An (ultra-simplified) managed fd object will look something like this:
+
+{% highlight cpp %}
+class ManagedFD
+{
+public:
+    ManagedFd(int fd) : fd_(fd) {}
+
+    ~ManagedFd() {
+        if (fd_ > 0) {
+            close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    int get() { return fd_; }
+
+private:
+    int fd_;
+};
+{% endhighlight %}
+
+And when we use it, it will look like:
+
+{% highlight cpp %}
+int update_startup_time() {
+    unsigned startup;
+    int raw_fd = open(".startup_time", O_RDWR)
+    ManagedFd fd(raw_fd);
+    if (*fd < 0) {
+        fprintf(stderr, "open failed\n");
+        return -1;
+    }
+
+    if (read_startup_time(*fd, &startup) != 0) {
+        fprintf(stderr, "read current startup time failed\n");
+        return -1;
+    }
+
+    fprintf(stdout, "last startup time was %u\n", startup);
+
+    startup = get_startup_time();
+    if (write_startup_time(*fd, startup) != 0) {
+        fprintf(stderr, "write current startup time failed\n");
+        return -1;
+    }
+
+    return 0;
+}
+{% endhighlight %}
+
+This is actually very neat, but presents a non-negligible overhead for developers, because they need to write many unique wrappers.
+
+This becomes even worse, when our code demands symmetric initialization and finalization of modules by simply calling `init` and `fini` methods.
+
+# Solution: Use Golang's Defer
+
+Golang's defer solves exactly that. The meaning of the English word defer is to "postpone, suspend". In simple terms, we register actions to be performed automatically when the scope ends. In golang `defer` accepts a function and executes it when the program leaves the current scope. Here is the same example in Go:
+
+{% highlight cpp %}
+func updateStartupTime() error {
+    file, err := os.OpenFile(".startup_time", os.O_RDWR, 0777)
+    if err != nil {
+        fmt.Println("Open file failed")
+        return err
+    }
+    defer file.Close()
+
+    startup, err := readStartupTime(file)
+    if err != nil {
+        fmt.Println("Read startup time failed")
+        return err
+    }
+
+    fmt.Println("Last startup time was", startup)
+    startup = getStartupTime()
+
+    err = writeStartupTime(file)
+    if err != nil {
+        fmt.Println("Write startup time failed")
+        return err
+    }
+
+    fmt.Println("Bye")
+    return nil
+}
+{% endhighlight %}
+
+As you can see, right after we successfully opened the file, we deferred the `file.Close()` operation. This way, no matter what happens, the file will always be closed gracefully and responsibly when the method.
+
+# C++ defer implementation
+
+Like I said before, this concept was a eureka moment for me, and I simply had to add this to my toolbox.
+
+I'm really glad to say that I've actually made something very similar without any nasty tricks, and here is my final implementation:
+
+{% highlight cpp %}
+/*
+ * Copyright (c) 2020-present Daniel Trugman
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+#include <functional>
+
+#define var_defer__(x) defer__ ## x
+#define var_defer_(x) var_defer__(x)
+
+#define ref_defer(ops) defer var_defer_(__COUNTER__)([&]{ ops; }) // Capture all by ref
+#define val_defer(ops) defer var_defer_(__COUNTER__)([=]{ ops; }) // Capture all by val
+#define none_defer(ops) defer var_defer_(__COUNTER__)([ ]{ ops; }) // Capture nothing
+
+class defer
+{
+public:
+    using action = std::function<void(void)>;
+
+public:
+    defer(const action& act)
+        : _action(act) {}
+    defer(action&& act)
+        : _action(std::move(act)) {}
+
+    defer(const defer& act) = delete;
+    defer& operator=(const defer& act) = delete;
+
+    defer(defer&& act) = delete;
+    defer& operator=(defer&& act) = delete;
+
+    ~defer()
+    {
+        _action();
+    }
+
+private:
+    action _action;
+};
+{% endhighlight %}
+
+The implementation is rather simple. It uses a lambda-expression to create a function object that is executed once the object goes out of scope. And by taking advantage of lambda's capture group, we are able to use the local members inside the cleanup function.
+
+And how will that look with our original example? As beautiful as it gets:
+{% highlight cpp %}
+int update_startup_time() {
+    unsigned startup;
+    int fd = open(".startup_time", O_RDWR);
+    if (fd < 0) {
+        fprintf(stderr, "open failed\n");
+        return -1;
+    }
+    defer close_fd([fd]{ close(fd); });
+
+    if (read_startup_time(fd, &startup) != 0) {
+        fprintf(stderr, "read current startup time failed\n");
+        return -1;
+    }
+
+    fprintf(stdout, "last startup time was %u\n", startup);
+
+    startup = get_startup_time();
+    if (write_startup_time(fd, startup) != 0) {
+        fprintf(stderr, "write current startup time failed\n");
+        return -1;
+    }
+
+    return 0;
+}
+{% endhighlight %}
+
+Thanks for baring with me and I hope you liked it! If you want to read some more about internals, productivity tools and programming tips, check out other stuff I wrote.
+
+Feel free to [download the source code from my Github](https://gist.github.com/dtrugman/d3b10ad0a91b2f069f07f9311d24932a).

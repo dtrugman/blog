@@ -14,6 +14,9 @@ main() {
     declare -r cmd="$1"
 
     case "$1" in
+        install)
+            (cd web; bundle install)
+            ;;
         run)
             (cd web; bundle exec jekyll serve --host 0.0.0.0)
             ;;
