@@ -1,0 +1,4 @@
+baseURL = 'https://trugman-internals.com/'
+languageCode = 'en-us'
+title = 'Trugman Internals'
+theme = 'LoveIt'
