@@ -214,7 +214,7 @@
     RootMe= ""
     Email = ""
     Phone = ""
-    RSS = ""
+    RSS = true
 
   # Page global config
   [params.page]
