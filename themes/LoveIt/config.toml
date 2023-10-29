@@ -140,13 +140,13 @@
       paginate = 6
   # Social config in home page
   [params.social]
-    GitHub = ""
-    Linkedin = ""
+    GitHub = "dtrugman"
+    Linkedin = "daniel-trugman"
     Twitter = ""
     Instagram = ""
     Facebook = ""
     Telegram = ""
-    Medium = ""
+    Medium = "@dtrugman"
     Gitlab = ""
     Youtubelegacy = ""
     Youtubecustom = ""
